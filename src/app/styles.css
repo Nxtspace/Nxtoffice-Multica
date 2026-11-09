@@ -105,6 +105,13 @@ body {
   color: var(--danger);
 }
 
+.badge.badge-warn,
+.badge.session-session-expired,
+.badge.session-no-permission {
+  border-color: var(--danger);
+  color: var(--danger);
+}
+
 .counts {
   display: inline-flex;
   gap: 8px;
@@ -181,6 +188,47 @@ body {
 
 .overlay .app-btn {
   margin-top: 8px;
+}
+
+.overlay .overlay-note {
+  font-size: 12px;
+  color: var(--warn);
+}
+
+/* 终态提示面板（不遮挡场景：与冻结快照并存的过期态说明 + 重新鉴权入口） */
+.terminal-panel {
+  position: absolute;
+  top: 12px;
+  right: 16px;
+  z-index: 9;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-width: 320px;
+  padding: 12px 14px;
+  border-radius: 12px;
+  background: rgba(11, 18, 32, 0.9);
+  border: 1px solid var(--danger);
+  color: var(--text);
+}
+
+.terminal-panel h2 {
+  margin: 0;
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--danger);
+}
+
+.terminal-panel p {
+  margin: 0;
+  font-size: 12px;
+  color: var(--text-muted);
+  line-height: 1.5;
+}
+
+.terminal-panel .app-btn {
+  align-self: flex-start;
+  margin-top: 4px;
 }
 
 /* 详情面板 */

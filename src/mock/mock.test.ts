@@ -8,7 +8,7 @@
 
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { MockChannel, auditMockScenarios } from './channel';
-import { DEMO_THRESHOLDS, MOCK_SCENARIOS } from './scenarios';
+import { DEMO_THRESHOLDS, MOCK_SCENARIOS, type MockScenarioId } from './scenarios';
 import { MOCK_HIDDEN_AGENT_ID, MOCK_MISSING_ISSUE_ID } from './fixtures';
 import { SnapshotStore, asAgentId, buildSceneModel } from '../contract';
 
@@ -21,7 +21,7 @@ interface Harness {
   readonly advance: (ms: number) => Promise<void>;
 }
 
-function harnessFor(scenario: 'normal' | 'empty' | 'stale' | 'expired' | 'disconnected' | 'error' | 'forbidden' | 'loading'): Harness {
+function harnessFor(scenario: MockScenarioId): Harness {
   let clock = T0;
   const now = (): number => clock;
   const channel = new MockChannel({ scenario, now });
@@ -89,21 +89,28 @@ describe('MockChannel × SnapshotStore', () => {
     expect(afterDone.runs.find((r) => r.id === 'mock-run-13')?.status).toBe('completed');
   });
 
-  it('disconnected：断线后保留最后快照、冻结动效、真值不再前进', async () => {
+  it('disconnected：断线后保留最后快照、冻结动效；自动重连补齐后离开断线态', async () => {
     const { store } = harnessFor('disconnected');
     await vi.advanceTimersByTimeAsync(200);
     expect(store.getState().snapshot).not.toBeNull();
 
-    // 断线发生在 4.2s；第一步脚本增量（3.2s）已应用
-    await vi.advanceTimersByTimeAsync(8_000);
-    const state = store.getState();
-    expect(state.presentation.connection).toBe('disconnected');
-    expect(state.presentation.dataLabel).toBe('offline');
-    expect(state.presentation.animationsFrozen).toBe(true);
-    expect(state.presentation.lastUpdatedAt).not.toBeNull();
-    expect(state.snapshot).not.toBeNull();
+    // 断线发生在 4.2s；第一步脚本增量（3.2s）已应用，断线后真值不再前进
+    await vi.advanceTimersByTimeAsync(4_500);
+    const dropped = store.getState();
+    expect(dropped.presentation.connection).toBe('disconnected');
+    expect(dropped.presentation.dataLabel).toBe('offline');
+    expect(dropped.presentation.animationsFrozen).toBe(true);
+    expect(dropped.presentation.lastUpdatedAt).not.toBeNull();
+    expect(dropped.snapshot).not.toBeNull();
     // 断线后未收到第二步（7.2s 的完成事件被 clearTimers 取消）
-    expect(state.snapshot?.snapshotVersion).toBe(2);
+    expect(dropped.snapshot?.snapshotVersion).toBe(2);
+
+    // 3.5s 后自动重连补齐（7.7s 触发、8.2s 完成）：瞬态断线离开，恢复最后真值
+    await vi.advanceTimersByTimeAsync(3_500);
+    const recovered = store.getState();
+    expect(recovered.presentation.connection).toBe('connected');
+    expect(recovered.presentation.dataLabel).toBe('live');
+    expect(recovered.snapshot?.snapshotVersion).toBe(2);
   });
 
   it('error：首次请求失败置 loadError；全量重取成功后清除错误并下发数据', async () => {
@@ -183,6 +190,81 @@ describe('MockChannel × SnapshotStore', () => {
     expect(after.presentation.connection).toBe('connected');
     expect(after.snapshot).not.toBeNull();
     expect(after.snapshot?.snapshotVersion).toBe(1);
+  });
+});
+
+describe('ADR-0004 结构化信号场景（U5）', () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('session-expired：先快照后终态；冻结动效保留最后快照，终态不随重取自愈', async () => {
+    const { store } = harnessFor('session-expired');
+    await vi.advanceTimersByTimeAsync(300);
+    // 先下发正常快照：会话仍 active
+    expect(store.getState().snapshot).not.toBeNull();
+    expect(store.getState().presentation.sessionState).toBe('active');
+
+    // 4.3s：通道下发 401 + session_expired → 终态，冻结动效，保留最后快照
+    await vi.advanceTimersByTimeAsync(4_000);
+    const terminal = store.getState();
+    expect(terminal.presentation.sessionState).toBe('session-expired');
+    expect(terminal.presentation.animationsFrozen).toBe(true);
+    expect(terminal.snapshot).not.toBeNull();
+    expect(terminal.presentation.lastUpdatedAt).not.toBeNull();
+    // 终态确立后不再处于限流退避
+    expect(terminal.presentation.retryAfterMs).toBeNull();
+
+    // 铁律：后续快照不能让终态自愈（须重新鉴权显式复位）
+    store.requestFullRefetch();
+    await vi.advanceTimersByTimeAsync(400);
+    expect(store.getState().snapshot).not.toBeNull();
+    expect(store.getState().presentation.sessionState).toBe('session-expired');
+
+    // 重新鉴权（显式复位）后回到 active
+    store.resetSessionState();
+    expect(store.getState().presentation.sessionState).toBe('active');
+  });
+
+  it('access-denied：连接后立即 403，从不下发任何快照（零存在性泄露）', async () => {
+    const { store, channel } = harnessFor('access-denied');
+    await vi.advanceTimersByTimeAsync(300);
+    const state = store.getState();
+    expect(state.presentation.sessionState).toBe('no-permission');
+    expect(state.snapshot).toBeNull();
+    expect(state.presentation.loadError).toBeNull(); // 终态不是「可重试错误」
+    expect(state.presentation.connection).toBe('connected');
+
+    // 工作区级越权：详情按单对象重新鉴权一律 403，不泄露对象存在性
+    const denied = await channel.fetchDetail({ kind: 'agent', id: asAgentId('mock-agent-01') });
+    expect(denied.ok).toBe(false);
+    if (!denied.ok) {
+      expect(denied.failure.code).toBe(403);
+      expect(denied.failure.reason).toBe('permission-denied');
+    }
+  });
+
+  it('rate-limited：429 进入 loading 退避；退避结束后自动重取并恢复，不沉淀终态', async () => {
+    const { store } = harnessFor('rate-limited');
+    await vi.advanceTimersByTimeAsync(400); // 连接后立即下发 429
+    const limited = store.getState();
+    expect(limited.presentation.retryAfterMs).toBe(3_000);
+    expect(limited.presentation.loadError).not.toBeNull();
+    expect(limited.presentation.sessionState).toBe('active'); // 瞬态，非终态
+    expect(limited.snapshot).toBeNull();
+
+    // 3.4s：退避结束自动全量重取 → 离开 loading，错误与退避标记清除
+    await vi.advanceTimersByTimeAsync(3_400);
+    const recovered = store.getState();
+    expect(recovered.presentation.retryAfterMs).toBeNull();
+    expect(recovered.presentation.loadError).toBeNull();
+    expect(recovered.snapshot).not.toBeNull();
+    expect(recovered.presentation.connection).toBe('connected');
+    expect(recovered.presentation.sessionState).toBe('active');
   });
 });
 

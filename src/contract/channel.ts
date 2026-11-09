@@ -8,18 +8,22 @@
  * - connect() 后先发 connection('connecting'|'connected')，再发 update；
  * - 断线：connection('disconnected')，此后不再有 update，直到恢复；
  * - requestRecovery() 的响应是若干 update（补齐的 delta 序列，或一份 full）。
+ *
+ * 错误事件：message 始终可读（人话）；ADR-0004 结构化错误经 structured
+ * 下发——只有它派生终态（error-signals.ts），message 文本不参与状态推导。
  */
 
 import type { ObjectRef } from './ids';
 import type { DetailResult } from './detail';
 import type { RecoveryRequest, SnapshotUpdate } from './updates';
+import type { StructuredError } from './error-signals';
 
 export type ConnectionState = 'idle' | 'connecting' | 'connected' | 'disconnected' | 'reconnecting';
 
 export type ChannelEvent =
   | { readonly type: 'connection'; readonly state: ConnectionState }
   | { readonly type: 'update'; readonly update: SnapshotUpdate }
-  | { readonly type: 'error'; readonly message: string };
+  | { readonly type: 'error'; readonly message: string; readonly structured?: StructuredError };
 
 export interface SnapshotChannel {
   /** 'mock' 仅限隔离开发；'live' 须待平台正式入口验证后启用 */

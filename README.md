@@ -2,7 +2,7 @@
 
 专为 Multica 定制的 2D/3D AI Agent 可视化虚拟办公室。通过等距 2D 场景与沉浸式 3D 空间，将 Agent、Squad、任务执行、工具调用及协作过程转化为直观、动态、可交互的视觉体验。
 
-> **当前阶段：U3（共享契约 + mock 快照生成器）已合入，U5 视觉层六态实现中。** 本仓库当前含工程骨架、ADR 归档、共享契约层（`src/contract`）、mock 隔离开发数据（`src/mock`）与 2D/3D 占位场景。2D 渲染层选型见 `docs/adr/0003`（SVG + React）。正式数据入口与新鲜度阈值均为未决项（D-2 / D-3），**当前所有数据均为 mock，不得用于验收放行**。
+> **当前阶段：U3（共享契约 + mock 快照生成器）已合入，U5 视觉层六态已实现（待评审）。** 本仓库当前含工程骨架、ADR 归档、共享契约层（`src/contract`）、mock 隔离开发数据（`src/mock`）与 2D/3D 占位场景。2D 渲染层选型见 `docs/adr/0003`（SVG + React）。正式数据入口与新鲜度阈值均为未决项（D-2 / D-3），**当前所有数据均为 mock，不得用于验收放行**。
 
 ## 目录结构与职责
 
@@ -68,6 +68,7 @@ npm run preview        # 预览构建产物 http://localhost:4173
 - 默认分支 `main`，CI 在 push/PR 到 `main` 时触发。
 - U3（共享契约/mock）、U4（3D 小样）在独立分支开发，完成后合入 `main`；U1 骨架的目录结构、依赖版本、tsconfig/vitest 配置已与 U3 对齐，合并时不重排。
 - U3（NXTLAB-19）已按 `u3-shared-contract-mock.patch` 合入：`src/contract` / `src/mock` / `src/views` / `src/app` 落地，U1 的占位外壳（`src/App.tsx`、`src/index.css`）由 `src/app/App.tsx` 取代并删除；three 栈版本取 U4 实测基线（见上文「依赖版本基线」）。
+- U5（NXTLAB-26，视觉层 expired/no-permission）在 `agent/orion/30a3f32f4e0f` 分支开发：新增 `src/contract/error-signals.ts`（ADR-0004 结构化错误分类）与 `src/contract/visual-state.ts`（六态唯一推导处），store 落地终态不自愈 / 429 退避自动重取，mock 新增 `session-expired` / `access-denied` / `rate-limited` 三场景，e2e 五类场景 × 2D/3D 见 `e2e/state-matrix.spec.ts`。
 - 提交信息结尾加 `Co-Authored-By: Claude Code <noreply@anthropic.com>`。
 - CI 两job：`build`（install/typecheck/test/build，上传 dist）与 `e2e`（Playwright chromium，失败上传 trace）。**合并前要求 CI 通过。**
 

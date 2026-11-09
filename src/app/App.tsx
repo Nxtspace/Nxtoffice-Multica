@@ -1,13 +1,16 @@
 /**
  * 应用外壳（占位）：装配 mock 会话 → store → 2D/3D 占位场景。
  *
- * 只做「装配与呈现许可透传」：状态字典、版本/过期/可见性判断全部来自共享层。
- * mock 场景选择器、视图切换、详情按单对象重新鉴权（含竞态取消）与本外壳的四态
- * 覆盖（加载/空/错误/正常）都在这里演示，供 2D/3D 共用。
+ * 只做「装配与呈现许可透传」：状态字典、版本/过期/可见性判断全部来自共享层；
+ * 六态视觉矩阵由 deriveVisualState（contract）唯一推导，本外壳只按结果呈现。
+ * mock 场景选择器、视图切换、详情按单对象重新鉴权（含竞态取消）与本外壳的
+ * 四态覆盖（加载/空/错误/正常）与 ADR-0004 终态（过期/无权限）都在这里演示，
+ * 供 2D/3D 共用。
  */
 
 import { lazy, Suspense, useEffect, useMemo, useState } from 'react';
 import type { AgentId, AgentSceneModel, ContractObject, DetailFailure, SceneModel } from '../contract';
+import { deriveVisualState } from '../contract';
 import { STATE_LABELS } from '../views/scene-tokens';
 import { IsometricScene } from '../views/two-d';
 import { useStoreState, toSceneModel } from './hooks';
@@ -38,6 +41,13 @@ const FRESHNESS_LABELS: Readonly<Record<string, string>> = {
   fresh: '新鲜',
   stale: '滞后',
   expired: '过期',
+};
+
+/** ADR-0004 终态会话徽标（sessionState 只来自结构化错误码） */
+const SESSION_LABELS: Readonly<Record<string, string>> = {
+  active: '会话正常',
+  'session-expired': '会话已过期（终态）',
+  'no-permission': '无权限（终态）',
 };
 
 /** 详情面板状态（含按单对象重新鉴权的失败态） */
@@ -135,15 +145,40 @@ function WorkspaceStage({ scenarioId, view }: { readonly scenarioId: MockScenari
 
   useEffect(() => () => session.dispose(), [session]);
 
-  const showLoading = !snapshot && presentation.loadError == null && presentation.connection !== 'disconnected';
-  const showError = presentation.loadError != null;
-  const showEmpty = model != null && model.agents.length === 0;
+  // US-5 六态视觉矩阵：唯一推导处在共享层，外壳只呈现
+  const visualState = deriveVisualState({
+    sessionState: presentation.sessionState,
+    connection: presentation.connection,
+    dataLabel: presentation.dataLabel,
+    hasSnapshot: snapshot != null,
+    visibleAgentCount: model?.agents.length ?? 0,
+    loadError: presentation.loadError,
+    retryAfterMs: presentation.retryAfterMs,
+  });
+
+  // 终态无权限：场景、计数、详情一律不渲染（零存在性泄露）
+  const sceneAllowed = visualState !== 'no-permission' && model != null;
+  const isSessionExpired = presentation.sessionState === 'session-expired';
+  // 加载态的两个瞬态子形态：错误可重试（overlay-error）/ 限流退避（overlay-loading 内提示）
+  const showError =
+    visualState === 'loading' &&
+    presentation.loadError != null &&
+    presentation.retryAfterMs == null &&
+    !isSessionExpired;
   const frozenBanner =
     presentation.dataLabel === 'offline' || presentation.dataLabel === 'expired'
       ? `已冻结：${presentation.dataLabel === 'offline' ? '连接中断' : '数据过期'}，展示最后已知快照（最后更新 ${formatTime(presentation.lastUpdatedAt)}）`
-      : null;
+      : isSessionExpired
+        ? `会话已过期：展示最后已知快照，动效已冻结（最后更新 ${formatTime(presentation.lastUpdatedAt)}）`
+        : null;
 
   const selectedAgent = model?.agents.find((a) => a.agent.id === selectedAgentId) ?? null;
+
+  const handleReauth = () => {
+    // 重新鉴权：复位终态会话（终态不自愈，只能显式复位）后重新拉取
+    session.store.resetSessionState();
+    session.store.requestFullRefetch();
+  };
 
   return (
     <>
@@ -157,18 +192,27 @@ function WorkspaceStage({ scenarioId, view }: { readonly scenarioId: MockScenari
         {presentation.freshness && (
           <span className="badge">新鲜度：{FRESHNESS_LABELS[presentation.freshness.status] ?? presentation.freshness.status}</span>
         )}
+        <span className={`badge session-${presentation.sessionState}`}>
+          {SESSION_LABELS[presentation.sessionState] ?? presentation.sessionState}
+        </span>
+        <span className="badge">六态：{visualState}</span>
+        {presentation.retryAfterMs != null && (
+          <span className="badge badge-warn" data-testid="backoff-badge">
+            限流退避 {Math.round(presentation.retryAfterMs / 1000)}s 后自动重试
+          </span>
+        )}
         <span className="badge">快照版本 v{snapshot?.snapshotVersion ?? '—'}</span>
         <span className="badge">最后更新 {formatTime(presentation.lastUpdatedAt)}</span>
-        {model && (
+        {sceneAllowed && (
           <span className="counts">
             <span>
-              工作 <b>{model.counts.working}</b>
+              工作 <b>{model?.counts.working ?? 0}</b>
             </span>
             <span>
-              空闲 <b>{model.counts.idle}</b>
+              空闲 <b>{model?.counts.idle ?? 0}</b>
             </span>
             <span>
-              未知 <b>{model.counts.unknown}</b>
+              未知 <b>{model?.counts.unknown ?? 0}</b>
             </span>
           </span>
         )}
@@ -178,19 +222,38 @@ function WorkspaceStage({ scenarioId, view }: { readonly scenarioId: MockScenari
       </div>
       <div className="app-main">
         <div className="app-stage">
-          {frozenBanner && <div className="freeze-banner">{frozenBanner}</div>}
-          {model && view === '2d' && (
-            <IsometricScene model={model} frozen={presentation.animationsFrozen} onSelect={setSelectedAgentId} />
+          {frozenBanner && (
+            <div className="freeze-banner" data-testid="freeze-banner">
+              {frozenBanner}
+            </div>
           )}
-          {model && view === '3d' && (
+          {sceneAllowed && view === '2d' && (
+            <IsometricScene model={model!} frozen={presentation.animationsFrozen} onSelect={setSelectedAgentId} />
+          )}
+          {sceneAllowed && view === '3d' && (
             <Suspense fallback={<div className="scene-suspense">正在加载 3D 场景…</div>}>
-              <OfficeScene model={model} frozen={presentation.animationsFrozen} onSelect={setSelectedAgentId} />
+              <OfficeScene model={model!} frozen={presentation.animationsFrozen} onSelect={setSelectedAgentId} />
             </Suspense>
           )}
-          {showLoading && (
+          {visualState === 'no-permission' && (
+            <div className="overlay overlay-no-permission" data-testid="overlay-no-permission">
+              <h2>无权访问该工作区</h2>
+              <p>当前账号未获授权（403 · access_denied）。没有下发任何数据，也不会展示对象、计数或详情。</p>
+              <p>终态来自结构化错误码；等待授权或切换到有权限的账号后重试。</p>
+              <button type="button" className="app-btn" onClick={() => session.store.requestFullRefetch()}>
+                重新请求
+              </button>
+            </div>
+          )}
+          {visualState === 'loading' && !showError && (
             <div className="overlay" data-testid="overlay-loading">
               <h2>正在加载</h2>
               <p>等待快照下发…（mock 场景：{MOCK_SCENARIOS[scenarioId].label}）</p>
+              {presentation.retryAfterMs != null && (
+                <p className="overlay-note" data-testid="backoff-note">
+                  请求被限流：按 Retry-After 退避，{Math.round(presentation.retryAfterMs / 1000)} 秒后自动重试（不会卡住，也不会变成错误终态）。
+                </p>
+              )}
             </div>
           )}
           {showError && (
@@ -202,16 +265,30 @@ function WorkspaceStage({ scenarioId, view }: { readonly scenarioId: MockScenari
               </button>
             </div>
           )}
-          {showEmpty && (
+          {visualState === 'empty' && (
             <div className="overlay" data-testid="overlay-empty">
               <h2>暂无可见内容</h2>
               <p>当前项目内没有可见的 Agent / 小队 / 议题（首次使用或权限范围内为空）。</p>
+              <p className="overlay-note">空态不是无权限：只是当前可见范围内没有对象。</p>
+            </div>
+          )}
+          {isSessionExpired && sceneAllowed && (
+            <div className="terminal-panel" data-testid="overlay-session-expired">
+              <h2>会话已过期</h2>
+              <p>需要重新鉴权才能继续获取更新；展示的是最后已知快照，动效已冻结，不伪造实时。</p>
+              <button type="button" className="app-btn" onClick={handleReauth}>
+                重新鉴权
+              </button>
             </div>
           )}
         </div>
         <aside className="app-aside" data-testid="detail-panel">
           <h3>详情（按单对象重新鉴权）</h3>
-          <DetailContent detail={detail} selectedAgent={selectedAgent} />
+          {visualState === 'no-permission' ? (
+            <p className="detail-denied">工作区级越权：未请求任何对象详情，不泄露存在性。</p>
+          ) : (
+            <DetailContent detail={detail} selectedAgent={selectedAgent} />
+          )}
         </aside>
       </div>
     </>

@@ -19,7 +19,7 @@ import { CONTRACT_VERSION, detailDenied, detailNotFound, validateSnapshot } from
 import { applyDelta } from '../contract/apply';
 import { asEdgeId, asIssueId, asRunId } from '../contract';
 import { MOCK_HIDDEN_AGENT_ID, MOCK_MISSING_ISSUE_ID } from './fixtures';
-import { MOCK_SCENARIOS, type MockScenarioId } from './scenarios';
+import { MOCK_SCENARIOS, type ChannelPlan, type MockScenarioId } from './scenarios';
 
 interface MockChannelOptions {
   readonly scenario: MockScenarioId;
@@ -62,12 +62,16 @@ export class MockChannel implements SnapshotChannel {
         return;
       }
       this.emitConnection('connected');
-      const snapshot = MOCK_SCENARIOS[this.scenario].build(this.now());
-      if (snapshot) {
-        this.base = snapshot;
-        this.version = snapshot.snapshotVersion;
-        this.sequence = snapshot.snapshotVersion;
-        this.emit({ type: 'update', update: { kind: 'full', snapshot } });
+      if (plan.structuredError && plan.structuredError.delayMs == null) {
+        // 立即下发结构化错误：不下发任何快照（零泄露，如 access-denied / rate-limited）
+        this.emitStructuredError(plan.structuredError);
+        return;
+      }
+      this.maybeEmitSnapshot(plan);
+      if (plan.structuredError) {
+        // 先有快照、后下发结构化错误（如 session-expired）：演示冻结最后快照的终态
+        this.later(() => this.emitStructuredError(plan.structuredError!), plan.structuredError.delayMs ?? 0);
+        return;
       }
       if (plan.disconnectAfterMs != null) {
         this.later(() => this.simulateDrop(), plan.disconnectAfterMs);
@@ -119,6 +123,10 @@ export class MockChannel implements SnapshotChannel {
    */
   async fetchDetail(ref: ObjectRef): Promise<DetailResult> {
     await Promise.resolve();
+    // 工作区级越权（access-denied 场景）：详情请求一律 403，不泄露任何对象存在性
+    if (MOCK_SCENARIOS[this.scenario].plan.structuredError?.status === 403) {
+      return detailDenied();
+    }
     if (!this.base) return detailNotFound();
     const find = () => {
       switch (ref.kind) {
@@ -184,6 +192,34 @@ export class MockChannel implements SnapshotChannel {
   private simulateDrop(): void {
     this.clearTimers();
     this.emitConnection('disconnected');
+    const { reconnectAfterMs } = MOCK_SCENARIOS[this.scenario].plan;
+    if (reconnectAfterMs != null) {
+      // 演示自动重连补齐：断线是瞬态，恢复后离开断线态（ADR-0004）
+      this.later(() => {
+        this.requestRecovery({
+          fromSnapshotVersion: this.version,
+          lastSequence: this.sequence,
+        });
+      }, reconnectAfterMs);
+    }
+  }
+
+  /** 按场景 plan 下发初始快照（emitInitial=false 的场景不下发任何数据） */
+  private maybeEmitSnapshot(plan: ChannelPlan): void {
+    if (!plan.emitInitial) return;
+    const snapshot = MOCK_SCENARIOS[this.scenario].build(this.now());
+    if (snapshot) {
+      this.base = snapshot;
+      this.version = snapshot.snapshotVersion;
+      this.sequence = snapshot.snapshotVersion;
+      this.emit({ type: 'update', update: { kind: 'full', snapshot } });
+    }
+  }
+
+  /** 下发 ADR-0004 结构化错误（message 始终可读，structured 派生终态/瞬态） */
+  private emitStructuredError(error: NonNullable<ChannelPlan['structuredError']>): void {
+    const { delayMs: _delayMs, ...structured } = error;
+    this.emit({ type: 'error', message: structured.message ?? structured.code, structured });
   }
 
   /**

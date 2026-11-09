@@ -6,6 +6,8 @@
  *   绝不把旧快照冒充当前（对齐测试用例 T09/T10）；
  * - 对每条 update 用 classifyUpdate 守门：旧版本丢弃、缺口触发 recovery；
  * - 组合「连接态 × 新鲜度」得出视图统一的呈现许可（动效冻结、时态标签）。
+ * - ADR-0004 终态会话（session-expired / no-permission）只来自结构化错误码，
+ *   确立后不随后续快照自愈，需显式 resetSessionState() 复位；429 走瞬态退避。
  *
  * React 绑定在 src/app/hooks.ts（useSyncExternalStore）；
  * 本类不得 import 任何视图/框架代码——依赖方向恒为 views → contract。
@@ -16,13 +18,14 @@ import { evaluateFreshness, type FreshnessAssessment, type FreshnessThresholds }
 import type { WorkspaceSnapshot } from './envelope';
 import { applyDelta, applyFull, type AppliedState } from './apply';
 import { classifyUpdate, type SnapshotUpdate } from './updates';
+import { classifyStructuredError, type SessionState } from './error-signals';
 
 export type DataLabel = 'not-connected' | 'live' | 'lagging' | 'expired' | 'offline';
 
 export interface PresentationState {
   readonly connection: ConnectionState;
   readonly freshness: FreshnessAssessment | null;
-  /** 冻结「正在工作」动效：断线或过期（ADR-01） */
+  /** 冻结「正在工作」动效：断线、数据过期或会话过期（ADR-01 / ADR-0004） */
   readonly animationsFrozen: boolean;
   readonly dataLabel: DataLabel;
   /** 最后更新时间（断线/过期时展示，RFC3339） */
@@ -31,6 +34,13 @@ export interface PresentationState {
   readonly mock: boolean;
   /** 请求错误（加载失败态；恢复后清除） */
   readonly loadError: string | null;
+  /**
+   * 会话终态（ADR-0004）：只能由结构化错误码派生（error-signals.ts），
+   * 一旦确立不随下一次快照自愈——须重新鉴权（resetSessionState）。
+   */
+  readonly sessionState: SessionState;
+  /** 429 限流退避剩余展示值（ms；null = 未在退避） */
+  readonly retryAfterMs: number | null;
 }
 
 export interface StoreState {
@@ -56,6 +66,8 @@ const INITIAL_PRESENTATION: PresentationState = {
   lastUpdatedAt: null,
   mock: false,
   loadError: null,
+  sessionState: 'active',
+  retryAfterMs: null,
 };
 
 export class SnapshotStore {
@@ -64,6 +76,7 @@ export class SnapshotStore {
   private channel: SnapshotChannel | null = null;
   private unsubscribeChannel: (() => void) | null = null;
   private clockTimer: ReturnType<typeof setInterval> | null = null;
+  private backoffTimer: ReturnType<typeof setTimeout> | null = null;
   private readonly listeners = new Set<() => void>();
   private readonly options: SnapshotStoreOptions;
 
@@ -109,6 +122,7 @@ export class SnapshotStore {
 
   dispose(): void {
     this.stopClock();
+    this.clearBackoff();
     this.detachChannel();
     this.listeners.clear();
   }
@@ -118,7 +132,56 @@ export class SnapshotStore {
     this.channel?.requestFullRefetch();
   }
 
+  /**
+   * 重新鉴权后清除会话终态（ADR-0004：终态不自愈，只能显式复位）。
+   * 复位后由调用方重新 connect / requestFullRefetch 拉取数据。
+   */
+  resetSessionState(): void {
+    this.clearBackoff();
+    const presentation = this.derivePresentation(
+      this.state.snapshot,
+      this.state.presentation.connection,
+      this.now(),
+    );
+    this.setState({
+      ...this.state,
+      presentation: {
+        ...presentation,
+        sessionState: 'active',
+        retryAfterMs: null,
+        loadError: null,
+      },
+    });
+  }
+
   // ---- 内部 ----
+
+  private clearBackoff(): void {
+    if (this.backoffTimer != null) {
+      clearTimeout(this.backoffTimer);
+      this.backoffTimer = null;
+    }
+  }
+
+  /** 429 退避：到了之后退出退避态并自动重取（瞬态，不沉淀为终态） */
+  private scheduleBackoff(retryAfterMs: number): void {
+    this.clearBackoff();
+    const delay = Math.max(retryAfterMs, 0);
+    this.backoffTimer = setTimeout(() => {
+      this.backoffTimer = null;
+      // 退避结束：先离开退避态，再触发重取；重取成功后 commitSnapshot 清 loadError
+      const presentation = this.derivePresentation(
+        this.state.snapshot,
+        this.state.presentation.connection,
+        this.now(),
+      );
+      this.setState({
+        ...this.state,
+        presentation: { ...presentation, retryAfterMs: null },
+      });
+      this.channel?.requestFullRefetch();
+    }, delay);
+  }
 
   private now(): number {
     return this.options.now?.() ?? Date.now();
@@ -143,6 +206,38 @@ export class SnapshotStore {
         return;
       }
       case 'error': {
+        // ADR-0004：只有结构化错误码派生终态；非结构化 message 走既有可重试语义
+        const structured = event.structured ? classifyStructuredError(event.structured) : null;
+        if (structured?.kind === 'terminal') {
+          this.clearBackoff();
+          const prev = this.state.presentation;
+          this.setState({
+            ...this.state,
+            presentation: {
+              ...prev,
+              sessionState: structured.terminal,
+              loadError: null,
+              retryAfterMs: null,
+              // 会话过期与断线/数据过期同样冻结「正在工作」动效（no-permission 不涉及快照）
+              animationsFrozen: prev.animationsFrozen || structured.terminal === 'session-expired',
+            },
+          });
+          return;
+        }
+        if (structured?.kind === 'transient-rate-limited') {
+          const retryAfterMs = structured.retryAfterMs ?? 0;
+          this.setState({
+            ...this.state,
+            presentation: {
+              ...this.state.presentation,
+              retryAfterMs,
+              loadError: event.message,
+            },
+          });
+          this.scheduleBackoff(retryAfterMs);
+          return;
+        }
+        // unmatched / 非结构化：可重试错误，不派生任何终态
         this.setState({
           ...this.state,
           presentation: { ...this.state.presentation, loadError: event.message },
@@ -204,9 +299,11 @@ export class SnapshotStore {
     if (!this.applied) return;
     const snapshot = this.applied.snapshot;
     const presentation = this.derivePresentation(snapshot, this.state.presentation.connection, this.now());
-    // 收到新数据即清除上一轮的请求错误（恢复语义）
+    // 收到新数据即清除上一轮的请求错误与退避（恢复语义）；
+    // 但 sessionState 终态不在此清除——ADR-0004 终态只能由 resetSessionState 复位。
     const loadError = null;
-    this.setState({ snapshot, presentation: { ...presentation, loadError } });
+    const retryAfterMs = null;
+    this.setState({ snapshot, presentation: { ...presentation, loadError, retryAfterMs } });
   }
 
   private derivePresentation(
@@ -218,16 +315,19 @@ export class SnapshotStore {
       return {
         connection,
         freshness: null,
-        animationsFrozen: connection !== 'connected',
+        animationsFrozen: connection !== 'connected' || this.state.presentation.sessionState === 'session-expired',
         dataLabel: 'not-connected',
         lastUpdatedAt: null,
         mock: false,
         loadError: this.state.presentation.loadError,
+        sessionState: this.state.presentation.sessionState,
+        retryAfterMs: this.state.presentation.retryAfterMs,
       };
     }
     const freshness = evaluateFreshness(snapshot, nowMs, this.options.thresholds);
     const offline = connection === 'disconnected' || connection === 'reconnecting';
-    const animationsFrozen = offline || freshness.status === 'expired';
+    const sessionExpired = this.state.presentation.sessionState === 'session-expired';
+    const animationsFrozen = offline || freshness.status === 'expired' || sessionExpired;
     const dataLabel: DataLabel = offline
       ? 'offline'
       : freshness.status === 'expired'
@@ -243,6 +343,8 @@ export class SnapshotStore {
       lastUpdatedAt: snapshot.sourceUpdatedAt,
       mock: snapshot.dataSource.kind === 'mock',
       loadError: this.state.presentation.loadError,
+      sessionState: this.state.presentation.sessionState,
+      retryAfterMs: this.state.presentation.retryAfterMs,
     };
   }
 }

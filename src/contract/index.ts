@@ -17,5 +17,7 @@ export * from './apply';
 export * from './validate';
 export * from './detail';
 export * from './channel';
+export * from './error-signals';
 export * from './store';
+export * from './visual-state';
 export * from './selectors';
