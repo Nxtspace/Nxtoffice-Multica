@@ -1,15 +1,8 @@
-import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
-import { App } from './App';
-import './index.css';
+import App from './app/App';
+import './app/styles.css';
 
-const root = document.getElementById('root');
-if (!root) {
-  throw new Error('index.html 缺少 #root 挂载点');
-}
+const container = document.getElementById('root');
+if (!container) throw new Error('缺少 #root 挂载点（index.html）');
 
-createRoot(root).render(
-  <StrictMode>
-    <App />
-  </StrictMode>,
-);
+createRoot(container).render(<App />);

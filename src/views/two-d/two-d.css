@@ -1,0 +1,48 @@
+/* 2D 等距占位场景样式（占位值，待设计系统定稿后替换） */
+.iso-svg {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.agent-token {
+  cursor: pointer;
+  outline: none;
+}
+
+.agent-token:focus-visible .podium-top {
+  stroke-width: 3;
+}
+
+.agent-token .podium-left,
+.agent-token .podium-right {
+  fill: #141c29;
+}
+
+/* 「工作中」脉冲：唯一需要动效的状态；其余状态静止 */
+.agent-token.working .state-ring {
+  animation: iso-pulse 1.6s ease-in-out infinite;
+}
+
+/* 过期/断线：冻结动效（ADR-01），不伪装实时 */
+.scene-frozen .agent-token.working .state-ring {
+  animation: none;
+  opacity: 0.45;
+}
+
+@keyframes iso-pulse {
+  0%,
+  100% {
+    opacity: 0.25;
+  }
+  50% {
+    opacity: 0.85;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .agent-token.working .state-ring {
+    animation: none;
+    opacity: 0.55;
+  }
+}

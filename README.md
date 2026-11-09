@@ -2,7 +2,7 @@
 
 专为 Multica 定制的 2D/3D AI Agent 可视化虚拟办公室。通过等距 2D 场景与沉浸式 3D 空间，将 Agent、Squad、任务执行、工具调用及协作过程转化为直观、动态、可交互的视觉体验。
 
-> **当前阶段：U1 建仓骨架（NXTLAB-16）。** 本仓库目前只含工程骨架与 ADR 归档，不含 2D/3D 场景实现。2D 渲染层选型待项目方裁定（见 `docs/adr/0003`），骨架阶段不安装任何 2D 渲染库。
+> **当前阶段：U3（共享契约 + mock 快照生成器）已合入，U5 视觉层六态实现中。** 本仓库当前含工程骨架、ADR 归档、共享契约层（`src/contract`）、mock 隔离开发数据（`src/mock`）与 2D/3D 占位场景。2D 渲染层选型见 `docs/adr/0003`（SVG + React）。正式数据入口与新鲜度阈值均为未决项（D-2 / D-3），**当前所有数据均为 mock，不得用于验收放行**。
 
 ## 目录结构与职责
 
@@ -14,21 +14,32 @@ Nxtoffice-Multica/
 │   └── 0003-adr-02-revision-2d-scene-svg-react.md # D-1 修订：2D 改 SVG+React
 ├── e2e/                      # Playwright 验证位（双视图同一脚本的核对留位）
 ├── src/
-│   ├── app/                  # 应用外壳（路由、详情入口；U3 填充）
-│   ├── contract/             # 共享状态契约（对象 ID、关系边、快照版本；U3 填充）
-│   ├── mock/                 # mock 快照生成器（U3 填充）
+│   ├── app/                  # 应用外壳：场景切换、详情按单对象重新鉴权、四态装配
+│   ├── contract/             # 共享契约层：状态字典、新鲜度、结构化错误信号、呈现状态机
+│   ├── mock/                 # mock 快照生成器与场景矩阵（隔离开发，不得用于验收）
 │   ├── views/
-│   │   ├── two-d/            # 2D 等距视图（渲染层待裁定，骨架不落地）
-│   │   └── three-d/          # 3D 沉浸视图（R3F；U4 填充）
-│   ├── App.tsx               # 骨架外壳：两视图占位 section
+│   │   ├── scene-tokens.ts   # 2D/3D 共用的状态色与标签
+│   │   ├── two-d/            # 2D 等距视图（SVG + React + CSS 动画，ADR-0003）
+│   │   └── three-d/          # 3D 沉浸视图（R3F；懒加载，独立分包）
 │   ├── main.tsx
-│   └── index.css
+│   └── app/styles.css
 ├── .github/workflows/ci.yml  # CI：build（typecheck/test/build）+ e2e（Playwright）
 ├── THIRD-PARTY-NOTICES.md    # 第三方资产登记（openclaw-office-2 MIT 署名链）
 └── LICENSE                   # MIT
 ```
 
-`src/` 下以 `.gitkeep` 占位的目录是 U3（共享契约骨架与 mock 快照生成器，NXTLAB-19）/ U4（3D 技术小样，NXTLAB-18）的挂位，避免合并冲突；**移植 openclaw-office-2 模块时逐行登记 `THIRD-PARTY-NOTICES.md` 的移植登记表**。
+`src/contract` 是 2D/3D 双视图唯一的语义来源（ADR-01）；视图层只做布局、绘制、命中与动效，不做状态推导。**移植 openclaw-office-2 模块时逐行登记 `THIRD-PARTY-NOTICES.md` 的移植登记表**。
+
+## 依赖版本基线（three 栈）
+
+| 依赖 | 锁定版本 | 依据 |
+| --- | --- | --- |
+| `three` | `0.183.1` | U4（NXTLAB-18）实测基线 |
+| `@react-three/drei` | `10.7.7` | U4 实测基线 |
+| `@react-three/fiber` | `9.5.0` | U4 实测基线 |
+| `@types/three` | `0.183.1` | 与 `three` 版本对齐（three 不自带类型） |
+
+U3 合入时存在两套候选：U3 补丁 pin `three 0.187.0` / `drei 10.7.9` / `fiber 9.8.2`，U4 实测基线为 `three 0.183.1` / `drei 10.7.7` / `fiber 9.5`。**合入采用 U4 实测基线**，理由：U4 的渲染性能与浏览器兼容实测全部在该基线上得出，采用未实测的更新版本会使 U4 数据失效并引入回归风险；依赖升级须单独走变更评估（工程约定「不静默升级依赖」），不由合入顺带完成。`npm install` 需带 `--legacy-peer-deps`（`@react-three/fiber@9.5.0` 的可选 peer `expo` 链与 React 19 有解析冲突；`npm ci` 使用已生成的 lockfile 不受影响）。
 
 ## 本地命令
 
@@ -46,15 +57,17 @@ npm run preview        # 预览构建产物 http://localhost:4173
 
 - **包管理器固定 npm**，版本锁定在 `package-lock.json`；CI 用 `npm ci`。
 - **TypeScript 严格模式**（`tsconfig.json`：strict、noUnusedLocals、noUnusedParameters、verbatimModuleSyntax）；`npm run build` 先跑 `tsc --noEmit`，类型错误即构建失败。
-- **测试**：Vitest，全局环境 `node`；需要 DOM 的测试文件在文件头加 `// @vitest-environment jsdom`（见 `src/App.test.tsx`）。
+- **测试**：Vitest，全局环境 `node`；需要 DOM 的测试文件在文件头加 `// @vitest-environment jsdom`（见 `src/app/App.test.tsx`）。
 - **四态必覆盖**：空 / 加载 / 错误 / 正常。2D/3D 视图与详情按 `docs/adr/0001` 的状态字典实现，缺一个当缺陷处理。
-- **样式**：不引入 UI 框架；CSS 变量与设计 token 由 U3/U4 共享层统一（占位样式见 `src/index.css`）。
+- **样式**：不引入 UI 框架；CSS 变量与设计 token 由共享层统一（样式见 `src/app/styles.css` 与 `src/views/*`）。
 - **不新增依赖**。确有必要先给理由、体积影响与维护风险，等确认。骨架阶段明确**不安装 PixiJS**（`docs/adr/0003` 未决）。
+- **构建分包**：`vite.config.ts` 的 `manualChunks` 把 three 栈划入 `three-stack` 独立分包，3D 视图经 `React.lazy` 懒加载，2D 入口不承担 three 的下载与解析成本。
 
 ## 分支与合入规则
 
 - 默认分支 `main`，CI 在 push/PR 到 `main` 时触发。
 - U3（共享契约/mock）、U4（3D 小样）在独立分支开发，完成后合入 `main`；U1 骨架的目录结构、依赖版本、tsconfig/vitest 配置已与 U3 对齐，合并时不重排。
+- U3（NXTLAB-19）已按 `u3-shared-contract-mock.patch` 合入：`src/contract` / `src/mock` / `src/views` / `src/app` 落地，U1 的占位外壳（`src/App.tsx`、`src/index.css`）由 `src/app/App.tsx` 取代并删除；three 栈版本取 U4 实测基线（见上文「依赖版本基线」）。
 - 提交信息结尾加 `Co-Authored-By: Claude Code <noreply@anthropic.com>`。
 - CI 两job：`build`（install/typecheck/test/build，上传 dist）与 `e2e`（Playwright chromium，失败上传 trace）。**合并前要求 CI 通过。**
 

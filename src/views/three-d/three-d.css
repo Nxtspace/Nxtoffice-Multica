@@ -1,0 +1,55 @@
+/* 3D 占位场景的名牌样式（占位值，待设计系统定稿后替换） */
+.scene-3d {
+  position: relative;
+}
+
+/* 标签层：平铺在 Canvas 之上，位置由 LabelProjector 逐帧写入 */
+.scene-3d .scene3d-labels {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  user-select: none;
+  overflow: hidden;
+}
+
+.agent3d-label,
+.zone3d-label {
+  position: absolute;
+  left: 0;
+  top: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 1px;
+  padding: 2px 8px;
+  border-radius: 8px;
+  background: rgba(11, 18, 32, 0.78);
+  border: 1px solid #24344f;
+  color: #e2e8f0;
+  font-size: 12px;
+  line-height: 1.35;
+  white-space: nowrap;
+  transform: translate(-50%, -50%);
+  will-change: transform, opacity;
+}
+
+.zone3d-label {
+  font-size: 13px;
+  color: #94a3b8;
+}
+
+.agent3d-state {
+  font-size: 10px;
+}
+
+.agent3d-label.is-metadata .agent3d-name {
+  color: #94a3b8;
+  font-style: italic;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .agent3d-label,
+  .zone3d-label {
+    transition: none;
+  }
+}

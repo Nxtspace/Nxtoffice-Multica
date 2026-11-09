@@ -3,7 +3,7 @@
   "private": true,
   "version": "0.0.0",
   "type": "module",
-  "description": "Multica 可视化虚拟办公室：2D 等距 / 3D 双视图（U1 建仓骨架）",
+  "description": "Multica 可视化虚拟办公室：2D 等距 / 3D 双视图（共享契约 + mock 隔离开发数据）",
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
@@ -15,15 +15,19 @@
     "e2e:ui": "playwright test --ui"
   },
   "dependencies": {
+    "@react-three/drei": "10.7.7",
+    "@react-three/fiber": "9.5.0",
     "react": "19.3.1",
-    "react-dom": "19.3.1"
+    "react-dom": "19.3.1",
+    "three": "0.183.1"
   },
   "devDependencies": {
     "@playwright/test": "1.56.0",
     "@testing-library/react": "16.3.0",
-    "@types/node": "^24.19.2",
+    "@types/node": "24.19.2",
     "@types/react": "19.3.0",
     "@types/react-dom": "19.3.0",
+    "@types/three": "0.183.1",
     "@vitejs/plugin-react": "6.2.1",
     "jsdom": "27.0.0",
     "typescript": "5.9.3",
